@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/RacerX">
+        <file>Images/big.gif</file>
+        <file>Images/small.gif</file>
+    </qresource>
+</RCC>

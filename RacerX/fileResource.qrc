@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/RacerX">
+        <file>cfg/server.cfg</file>
+    </qresource>
+</RCC>
