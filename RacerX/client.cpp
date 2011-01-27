@@ -18,6 +18,10 @@ extern char serverIP[15];
 extern int commandPort;
 extern int streamPort;
 
+// number of udp packets to receive for one frame of
+// image and telemetry data
+float num_udp_pkts_ratio = (double) sizeof(INT_PKT) / DATA_CHUNK_SIZE;
+
 Client::Client()
 {
 
@@ -87,53 +91,78 @@ void Client::streamThread(void)
 //    quit("connect() failed.", 1);
     }
 
-    int imageSize = clientData.imgobj.img->imageSize;
-    double telemetry[4];
-    int arraysize = (int) (sizeof telemetry);
-    char sockData[imageSize];
+    int packetSize = sizeof(INT_PKT);
+    char sockData[packetSize];
     int i, j, k, bytes;
 
     /* Start receiving images */
     while(1)
     {
 
-        for(i = 0; i < imageSize; i = i + bytes )
+        for(i = 0; i < packetSize; i = i + bytes )
         {
-            if((bytes = ::recv(sock, sockData + i, imageSize - i, 0)) == -1)
+            if((bytes = ::recv(sock, sockData + i, packetSize - i, 0)) == -1)
             {
                 break;
             }
 
         }
 
-        ::recv(sock, telemetry, arraysize, 0);
+        // copy packet data into the packetData structure in client's image object
+        for(i = 0; i < packetSize; i++)
+            clientData.imgobj.packetData.bytes[i] = sockData[i];
+        if(i < packetSize) clientData.imgobj.packetData.bytes[i] = '\0';
 
-       /*thread safe. */
-       pthread_mutex_lock(&mutex_s);
+        // create a new image to store the compressed image data
+        IplImage *compImage;
+        compImage = cvCreateImage(cvSize(clientData.imgobj.packetData.pkt.imageWidth, clientData.imgobj.packetData.pkt.imageHeight),
+                                         clientData.imgobj.packetData.pkt.imageDepth, clientData.imgobj.packetData.pkt.imageChannels);
+        cvZero(compImage);
 
-        /* Convert the received data to OpenCV's IplImage form */
-       for (i = 0, k = 0; i < clientData.imgobj.img->height; i++) {
-           for (j = 0; j < clientData.imgobj.img->width; j++) {
-              ((uchar*)(clientData.imgobj.img->imageData + i * clientData.imgobj.img->widthStep))[j] = sockData[k++];
+        // copy the data received into the newly created image
+        for (i = 0, k = 0; i < compImage->height; i++) {
+           for (j = 0; j < compImage->width; j++) {
+              ((uchar*)(compImage->imageData + i * compImage->widthStep))[j] = clientData.imgobj.packetData.pkt.imageData[k++];
            }
-       }
+        }
 
-       clientData.imgobj.cvToQt();
-       clientData.isImageReady = 1;
+        // create a new image to store the decompressed image data
+        IplImage *decompImage = NULL;
+        CvMat* compmat;
 
-       clientData.telemetry[0] = telemetry[0];
-       clientData.telemetry[1] = telemetry[1];
-       clientData.telemetry[2] = telemetry[2];
-       clientData.telemetry[3] = telemetry[3];
-       clientData.isInfoReady = 1;
+        /*thread safe. */
+        pthread_mutex_lock(&mutex_s);
 
-       pthread_mutex_unlock(&mutex_s);
+        // decompress the image data received and store it in decompImage
+        // compmat only stores return value of the compressed CvMat type
+        // it does not have any memory allocated and should not be released
+        if((compmat = clientData.imgobj.decompress_image(&decompImage, compImage)) != NULL)
+        {
+            // if img already has memory allocated release it
+            if(clientData.imgobj.img) clientData.imgobj.freeIplImage();
+            // reallocate memory for img and clone the new image into img
+            clientData.imgobj.img = cvCloneImage(decompImage);
+        }
+        // convert the decompressed IplImage into QT's QImage format
+        clientData.imgobj.cvToQt(0);
 
-       /* Have we terminated yet? */
-       pthread_testcancel();
+        clientData.telemetry[0] = clientData.imgobj.packetData.pkt.telemetry[0];
+        clientData.telemetry[1] = clientData.imgobj.packetData.pkt.telemetry[1];
+        clientData.telemetry[2] = clientData.imgobj.packetData.pkt.telemetry[2];
+        clientData.telemetry[3] = clientData.imgobj.packetData.pkt.telemetry[3];
+        clientData.isDataReady = 1;
 
-       /* No. Sleep */
-       usleep(3000);
+        pthread_mutex_unlock(&mutex_s);
+
+        // release the images created
+        if(compImage) cvReleaseImage(&compImage);
+        if(decompImage) cvReleaseImage(&decompImage);
+
+        /* Have we terminated yet? */
+        pthread_testcancel();
+
+        /* No. Sleep */
+        usleep(3000);
    }
 }
 

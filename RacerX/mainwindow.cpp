@@ -378,22 +378,19 @@ void MainWindow::updateInS(void)
     * by enclosing it using pthread_mutex_lock
     */
 
-    if(clientData.isImageReady)
+    if(clientData.isDataReady)
     {
         pthread_mutex_lock(&mutex_s);
+        clientData.isDataReady = 0;
+
         QImage* temp = clientData.imgobj.temp;
         ui->videoFrame->setPixmap(QPixmap::fromImage(*temp));
-        clientData.isImageReady = 0;
-        pthread_mutex_unlock(&mutex_s);
-    }
-    if(clientData.isInfoReady)
-    {
-        clientData.isInfoReady = 0;
-        pthread_mutex_lock(&mutex_s);
+
         ui->speed->setProperty("value", QVariant(clientData.telemetry[0]));
         ui->position->setProperty("value", QVariant(clientData.telemetry[1]));
         ui->position_2->setProperty("value", QVariant(clientData.telemetry[2]));
         ui->orientation->setProperty("value", QVariant(clientData.telemetry[3]));
+
         pthread_mutex_unlock(&mutex_s);
     }
 

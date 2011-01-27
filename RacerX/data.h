@@ -7,8 +7,7 @@ class Data
 {
 public:
     Data();
-    int isImageReady;
-    int isInfoReady;
+    int isDataReady;
     int isCommandReady;
     int isReplyReady;
     Image imgobj;

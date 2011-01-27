@@ -19,12 +19,14 @@
 #include <opencv/highgui.h>
 #include "alarm.h"
 #include "control.h"
+#include "image.h"
 
 #define PORT 8888               // video out port
 
 CvCapture*	capture;         // required to interact with the camera using opencv
 IplImage*	img0;
 IplImage*	img1;
+CvMat*          compmat;
 int	is_data_ready = 0;       // informs the stream server that the data is ready
 int     is_info_ready = 0;       // informs the stream server that the telemetry info is ready
 int     new_set_of_commands = 0; // informs the controller that a new set of commands have arrived
@@ -56,7 +58,7 @@ int main(int argc, char** argv)
         (void) signal(SIGALRM, command_list_manager);
         
         pthread_t 	thread_s, thread_c, thread_cr;
-	int			key;
+	char	key;
 
 	if (argc == 2) {
 		capture = cvCaptureFromFile(argv[1]);
@@ -69,14 +71,9 @@ int main(int argc, char** argv)
 	}
 
 	img0 = cvQueryFrame(capture);
-	img1 = cvCreateImage(cvGetSize(img0), IPL_DEPTH_8U, 1);
-
-	cvZero(img1);
+        int p[3] = {CV_IMWRITE_JPEG_QUALITY, 80, 0};
+        
         cvNamedWindow("stream_server", CV_WINDOW_AUTOSIZE);
-
-	/* print the width and height of the frame, needed by the client */
-	fprintf(stdout, "width:  %d\nheight: %d\n\n", img0->width, img0->height);
-	fprintf(stdout, "Press 'q' to quit.\n\n");
 
 	/* run the streaming server as a separate thread */
 	if (pthread_create(&thread_s, NULL, streamServer, NULL)) {
@@ -99,16 +96,37 @@ int main(int argc, char** argv)
 		if (!img0) break;
 
 		img0->origin = 0;
-		//cvFlip(img0, img0, -1);
 
 		/**
-		 * convert to grayscale 
-		 * enclose it with pthread_mutex_lock to make it thread safe 
+		 * compress the image and copy it to 
+		 * the image and telemetry packet (see image.c)
+                 * thread safe
 		 */
 		pthread_mutex_lock(&mutex);
-		cvCvtColor(img0, img1, CV_BGR2GRAY);
-		is_data_ready = 1;
+                compmat = compress_image(&img1, img0, p);
+                if((img1 == NULL) || (compmat == NULL))
+                    quit("Failed to compress image.\n", 1);
+                
+                // copy Image data into INT_PKT
+                if(img1->imageSize < MAX_IMGSIZE)
+                {
+                    packetData.pkt.imageSize = img1->imageSize;
+                    packetData.pkt.imageWidth = img1->width;
+                    packetData.pkt.imageHeight = img1->height;
+                    packetData.pkt.imageDepth = IMG_TYPE;
+                    packetData.pkt.imageChannels = img1->nChannels;
+
+                    int i;
+                    for(i = 0; i < img1->imageSize; i++)
+                        packetData.pkt.imageData[i] = img1->imageData[i];
+                    packetData.pkt.imageData[i] = '\0';
+                }
+                
 		pthread_mutex_unlock(&mutex);
+
+                // release the compressed matrix
+                // as we no longer need it
+                cvReleaseMat(&compmat);
 
 		/* also display the video here on server */
 		cvShowImage("stream_server", img0);
@@ -168,7 +186,7 @@ void* streamServer(void* arg)
 		quit("bind() failed", 1);
 	}
 
-	/* wait for connection */
+        /* wait for connection */
 	if (listen(serversock, 10) == -1) {
 		quit("listen() failed.", 1);
 	}
@@ -179,38 +197,36 @@ void* streamServer(void* arg)
 	}
 
 	/* the size of the data to be sent */
-	int imgsize = img1->imageSize;
+	int packetsize = sizeof(INT_PKT);
 	int bytes, i;
+        //UDP_INT_PKT packet_buffer[ceil(num_udp_pkts_ratio)];
 
 	/* start sending images */
 	while(1) 
 	{
-		/* send the grayscaled frame, thread safe */
 		pthread_mutex_lock(&mutex);
-		//if (is_data_ready) {
-			bytes = send(clientsock, img1->imageData, imgsize, 0);
-			is_data_ready = 0;
-		//}
+                // copy telemetry data into INT_PKT (see image.c)
+                if(is_info_ready)
+                {
+                    packetData.pkt.telemetry[0] = telemetry[0];
+                    packetData.pkt.telemetry[1] = telemetry[1];
+	    	    packetData.pkt.telemetry[2] = telemetry[2];
+                    packetData.pkt.telemetry[3] = telemetry[3];
+                    
+                }
+
+                bytes = send(clientsock, packetData.bytes, packetsize, 0);
 		pthread_mutex_unlock(&mutex);
-
                          
-
 		/* if something went wrong, restart the connection */
-		if (bytes != imgsize) {
+		if (bytes != packetsize) {
 			fprintf(stderr, "Connection on stream server closed.\n");
 			close(clientsock);
 
 			if ((clientsock = accept(serversock, NULL, NULL)) == -1) {
 				quit("accept() failed", 1);
 			}
-		}
-                else //if (is_info_ready) 
-                {
-                    pthread_mutex_lock(&mutex);
-                    is_info_ready = 0;
-                    send(clientsock, telemetry, sizeof (telemetry), 0);
-                    pthread_mutex_unlock(&mutex);
-                }
+		} 
  
 		/* have we terminated yet? */
 		pthread_testcancel();
@@ -455,7 +471,6 @@ void quit(char* msg, int retval)
 	if (commandclient) close(commandclient);
 
 	if (capture) cvReleaseCapture(&capture);
-	if (img1) cvReleaseImage(&img1);
 
 	pthread_mutex_destroy(&mutex);
         pthread_mutex_destroy(&mutex_c);
